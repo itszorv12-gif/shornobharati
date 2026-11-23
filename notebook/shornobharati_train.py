@@ -6,54 +6,17 @@ app = marimo.App(width="full")
 
 @app.cell
 def _():
-    import json
-    import random
-    import time
-    from pathlib import Path
-
-    import numpy as np
-    import regex as re
-    import torch
-    import torch.nn as nn
-    import uharfbuzz as hb
-    import freetype
-    from PIL import Image as PILImage
-
-    return (
-        PILImage,
-        Path,
-        json,
-        nn,
-        np,
-        random,
-        re,
-        time,
-        torch,
-        freetype,
-        hb,
-    )
-
-
-@app.cell
-def _(torch):
     import marimo as mo
 
     mo.md(
-        f"""
-        # ShornoBharati — GPU Training Notebook (RTX Pro 6000 Blackwell 96GB)
+        """
+        # ShornoBharati — GPU Training Notebook (molab / RTX Pro 6000 Blackwell 96GB)
 
         **Recipe:** HarfBuzz-shaped synthetic Bangla rendering → grapheme-cluster CTC → length-shift OOD diagnostics.
 
-        | | |
-        |---|---|
-        | Device detected | `{torch.cuda.get_device_name(0) if torch.cuda.is_available() else "CPU (no CUDA)"}` |
-        | VRAM | `{round(torch.cuda.get_device_properties(0).total_memory/1024**3, 1) if torch.cuda.is_available() else 0} GB` |
+        **molab-ready:** this notebook self-bootstraps — it installs missing packages and downloads the Noto Sans Bengali font on first run. No manual uploads needed.
 
-        ⚠️ **Blackwell (sm_120) note:** use a CUDA 12.8 wheel:
-        `pip install torch --index-url https://download.pytorch.org/whl/cu128`
-        (torch ≥ 2.7). Also: `pip install uharfbuzz freetype-py regex marimo`.
-
-        **Protocol coverage:** E1 (shaping ablation), E2 (supervision granularity), E3 (length-shift dose–response). E4/E5 need real corpora/fonts — see the notes cell at the bottom.
+        **Protocol coverage:** E1 (shaping ablation), E2 (supervision granularity), E3 (length-shift dose–response). E4/E5 need real corpora — see the notes cell at the bottom.
         """
     )
     return (mo,)
@@ -61,80 +24,102 @@ def _(torch):
 
 @app.cell
 def _(mo):
-    mo.md("## 1. Controls\n\nConfigure, then click **RUN PIPELINE**. Changing any control re-triggers nothing until you click run again.")
-    return
+    import importlib.util
+    import subprocess
+    import sys
 
-
-@app.cell
-def _(mo):
-    preset = mo.ui.dropdown(
-        options=["custom", "E1: shaping ablation", "E2: supervision granularity", "E3: length shift", "quick-smoke"],
-        value="quick-smoke",
-        label="experiment preset",
-    )
-    preset
-    return (preset,)
-
-
-@app.cell
-def _(mo, preset):
-
-    defaults = {
-        "quick-smoke": dict(n_train=6000, n_val=700, n_ood=700, batch=256, epochs=10, lr=1e-3, hidden=256, lstm_layers=1, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
-        "E1: shaping ablation": dict(n_train=200000, n_val=2000, n_ood=2000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
-        "E2: supervision granularity": dict(n_train=200000, n_val=2000, n_ood=2000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="codepoint"),
-        "E3: length shift": dict(n_train=200000, n_val=2000, n_ood=3000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=4, wlen_max=9, ood_min=10, ood_max=12, shaping=True, vocab_mode="grapheme"),
-        "custom": dict(n_train=60000, n_val=1000, n_ood=1000, batch=512, epochs=15, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
+    required = ["torch", "uharfbuzz", "freetype", "PIL", "regex", "editdistance"]
+    pypi = {
+        "torch": "torch",
+        "uharfbuzz": "uharfbuzz",
+        "freetype": "freetype-py",
+        "PIL": "pillow",
+        "regex": "regex",
+        "editdistance": "editdistance",
     }
-    d = defaults[preset.value]
+    missing = [pypi[m] for m in required if importlib.util.find_spec(m) is None]
+    if missing:
+        print("installing:", ", ".join(missing))
+        subprocess.run(
+            [sys.executable, "-m", "pip", "install", "-q", *missing],
+            check=True,
+        )
 
-    n_train = mo.ui.slider(1000, 500000, value=d["n_train"], step=1000, label="n_train (synthetic words)")
-    n_val = mo.ui.slider(100, 20000, value=d["n_val"], step=100, label="n_val (IID)")
-    n_ood = mo.ui.slider(100, 20000, value=d["n_ood"], step=100, label="n_ood (length-shift)")
-    batch = mo.ui.slider(32, 4096, value=d["batch"], step=32, label="batch size (96GB → 1024+ ok)")
-    epochs = mo.ui.slider(1, 200, value=d["epochs"], label="epochs")
-    lr = mo.ui.number(start=1e-5, stop=1e-1, value=d["lr"], step=1e-4, label="learning rate")
-    hidden = mo.ui.dropdown([128, 256, 512], value=d["hidden"], label="BiLSTM hidden")
-    lstm_layers = mo.ui.slider(1, 4, value=d["lstm_layers"], label="LSTM layers")
-    wlen_min = mo.ui.slider(2, 12, value=d["wlen_min"], label="train min clusters/word")
-    wlen_max = mo.ui.slider(2, 12, value=d["wlen_max"], label="train max clusters/word")
-    ood_min = mo.ui.slider(2, 12, value=d["ood_min"], label="OOD min clusters/word")
-    ood_max = mo.ui.slider(2, 12, value=d["ood_max"], label="OOD max clusters/word")
-    shaping = mo.ui.switch(value=d["shaping"], label="HarfBuzz shaping (OFF = naive renderer = G1 ablation)")
-    vocab_mode = mo.ui.dropdown(["grapheme", "codepoint"], value=d["vocab_mode"], label="CTC supervision granularity (E2)")
-    run_btn = mo.ui.run_button(label="▶ RUN PIPELINE", kind="success")
-
-    mo.hstack(
-        [mo.vstack([n_train, n_val, n_ood, batch, epochs, lr]), mo.vstack([hidden, lstm_layers, wlen_min, wlen_max, ood_min, ood_max]), mo.vstack([preset, shaping, vocab_mode, run_btn])],
-        justify="start",
+    mo.md(
+        f"**Setup OK.** Missing packages installed: `{', '.join(missing) if missing else 'none — everything already present'}`. "
+        "(Cleaner alternative on molab: add these once in the notebook's *Packages* settings.)"
     )
+    return (missing,)
+
+
+@app.cell
+def _(mo, missing):
+    import json
+    import random
+    import time
+    from pathlib import Path
+
+    import numpy as np
+    import torch
+    import torch.nn as nn
+    from PIL import Image as PILImage
+
+    mo.md(f"Runtime imports ready. Python torch `{torch.__version__}`.")
     return (
-        batch,
-        epochs,
-        hidden,
-        lr,
-        lstm_layers,
-        n_ood,
-        n_train,
-        n_val,
-        ood_max,
-        ood_min,
-        run_btn,
-        shaping,
-        vocab_mode,
-        wlen_max,
-        wlen_min,
+        Path,
+        PILImage,
+        json,
+        nn,
+        np,
+        random,
+        time,
+        torch,
     )
 
 
 @app.cell
-def _(freetype, hb):
-    import io as _io
+def _(Path, mo):
+    import urllib.request
 
-    _FONT_BYTES = open("fonts/NotoSansBengali.ttf", "rb").read()
+    FONT_DIR = Path("fonts")
+    FONT_DIR.mkdir(exist_ok=True)
+    FONT_PATH = FONT_DIR / "NotoSansBengali.ttf"
+
+    if not FONT_PATH.exists():
+        sources = [
+            "https://github.com/googlefonts/noto-fonts/raw/main/hinted/ttf/NotoSansBengali/NotoSansBengali-Regular.ttf",
+            "https://raw.githubusercontent.com/googlefonts/noto-fonts/main/hinted/ttf/NotoSansBengali/NotoSansBengali-Regular.ttf",
+        ]
+        last_err = None
+        for url in sources:
+            try:
+                print("downloading font from", url)
+                urllib.request.urlretrieve(url, FONT_PATH)
+                last_err = None
+                break
+            except Exception as e:
+                last_err = e
+        if last_err is not None:
+            raise last_err
+
+    data = FONT_PATH.read_bytes()
+    assert data[:4] in (b"\x00\x01\x00\x00", b"true", b"OTTO"), "downloaded file is not a valid TTF"
+    mo.md(f"Font ready: `{FONT_PATH}` ({len(data)/1024:.0f} KB).")
+    return (FONT_PATH,)
+
+
+@app.cell
+def _(FONT_PATH, mo):
+    import freetype
+    import uharfbuzz as hb
+
+    with open(FONT_PATH, "rb") as _fh:
+        _FONT_BYTES = _fh.read()
     _HB_BLOB = hb.Blob(_FONT_BYTES)
     _HB_FACE = hb.Face(_HB_BLOB)
     _HB_FONT = hb.Font(_HB_FACE)
+
+    import regex as pre
 
     _INDEPENDENT_VOWELS = ["অ", "আ", "ই", "ঈ", "উ", "ঊ", "এ", "ঐ", "ও", "ঔ"]
     _CONSONANTS = ["ক", "খ", "গ", "ঘ", "ঙ", "চ", "ছ", "জ", "ঝ", "ঞ", "ট", "ঠ", "ড", "ঢ", "ণ", "ত", "থ", "দ", "ধ", "ন", "প", "ফ", "ব", "ভ", "ম", "য", "র", "ল", "শ", "ষ", "স", "হ", "ড়", "ঢ়", "য়"]
@@ -142,7 +127,7 @@ def _(freetype, hb):
     _CONJUNCTS = ["ক্ষ", "জ্ঞ", "স্থ", "ত্র", "দ্ব", "ন্দ", "প্র", "ব্র", "ক্র", "ম্ব", "চ্ছ", "স্ত", "স্ট", "ট্র", "ন্ট", "ক্ত", "ন্ন", "র্ন", "স্প", "শ্রী"]
 
     def grapheme_split(s):
-        return re.findall(r"\X", s)
+        return pre.findall(r"\X", s)
 
     def make_word(rng, min_cl=3, max_cl=6):
         n = rng.randint(min_cl, max_cl)
@@ -169,7 +154,7 @@ def _(freetype, hb):
     class _BaseRenderer:
         def __init__(self, canvas_h=64):
             self.canvas_h = canvas_h
-            self._ft = freetype.Face(_io.BytesIO(_FONT_BYTES))
+            self._ft = freetype.Face(str(FONT_PATH))
 
         def _set_px(self, px):
             self._ft.set_pixel_sizes(0, px)
@@ -211,8 +196,8 @@ def _(freetype, hb):
 
     class NaiveRenderer(_BaseRenderer):
         def render(self, text, px=40):
+            scale = px / _HB_FACE.upem
             glyphs = []
-            scale = px / hb.Face(hb.Blob(_FONT_BYTES)).upem
             for ch in text:
                 self._ft.load_char(ch, freetype.FT_LOAD_RENDER)
                 gid = self._ft.glyph.index
@@ -220,6 +205,7 @@ def _(freetype, hb):
                 glyphs.append((gid, type("P", (), {"x_advance": adv_px / scale, "x_offset": 0, "y_offset": 0})()))
             return self._draw(glyphs, px)
 
+    mo.md("Renderers ready (HarfBuzz-shaped + naive baseline for the G1 ablation).")
     return (
         NaiveRenderer,
         ShapingRenderer,
@@ -232,6 +218,8 @@ def _(freetype, hb):
 @app.cell
 def _(HEIGHT, WIDTH):
     def augment(img, rng):
+        import numpy as np
+
         img = img.astype(np.float32)
         img = img * rng.uniform(0.85, 1.15) + rng.uniform(-20, 20)
         if rng.random() < 0.5:
@@ -239,6 +227,8 @@ def _(HEIGHT, WIDTH):
         return np.clip(img, 0, 255)
 
     def render_resized(renderer, word, rng):
+        from PIL import Image as PILImage
+
         px = rng.randint(34, 58)
         img = renderer.render(word, px=px)
         scale = HEIGHT / img.shape[0]
@@ -250,6 +240,8 @@ def _(HEIGHT, WIDTH):
         return canvas
 
     def build_split(renderer, n, mincl, maxcl, seed):
+        import random
+
         rng = random.Random(seed)
         xs, ys = [], []
         for _ in range(n):
@@ -285,7 +277,7 @@ def _(nn):
             r, _ = self.rnn(f)
             return self.out(r)
 
-    return (make_crnn,)
+    return HEIGHT, WIDTH, make_crnn
 
 
 @app.cell
@@ -337,7 +329,74 @@ def _(HEIGHT, WIDTH, nn, np, torch):
 
 
 @app.cell
-def _(HEIGHT, mo, run_btn, torch):
+def _(mo):
+    mo.md("## 1. Controls\n\nChoose a preset, tweak sliders if you like, then click **▶ RUN PIPELINE**.")
+    return
+
+
+@app.cell
+def _(mo):
+    preset = mo.ui.dropdown(
+        options=["quick-smoke", "E1: shaping ablation", "E2: supervision granularity", "E3: length shift", "custom"],
+        value="quick-smoke",
+        label="experiment preset",
+    )
+    preset
+    return (preset,)
+
+
+@app.cell
+def _(mo, preset):
+    defaults = {
+        "quick-smoke": dict(n_train=6000, n_val=700, n_ood=700, batch=256, epochs=10, lr=1e-3, hidden=256, lstm_layers=1, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
+        "E1: shaping ablation": dict(n_train=200000, n_val=2000, n_ood=2000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
+        "E2: supervision granularity": dict(n_train=200000, n_val=2000, n_ood=2000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="codepoint"),
+        "E3: length shift": dict(n_train=200000, n_val=2000, n_ood=3000, batch=1024, epochs=10, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=4, wlen_max=9, ood_min=10, ood_max=12, shaping=True, vocab_mode="grapheme"),
+        "custom": dict(n_train=60000, n_val=1000, n_ood=1000, batch=512, epochs=15, lr=1e-3, hidden=256, lstm_layers=2, wlen_min=3, wlen_max=6, ood_min=7, ood_max=9, shaping=True, vocab_mode="grapheme"),
+    }
+    d = defaults[preset.value]
+
+    n_train = mo.ui.slider(1000, 500000, value=d["n_train"], step=1000, label="n_train (synthetic words)")
+    n_val = mo.ui.slider(100, 20000, value=d["n_val"], step=100, label="n_val (IID)")
+    n_ood = mo.ui.slider(100, 20000, value=d["n_ood"], step=100, label="n_ood (length-shift)")
+    batch = mo.ui.slider(32, 4096, value=d["batch"], step=32, label="batch size (96GB → 1024+ ok)")
+    epochs = mo.ui.slider(1, 200, value=d["epochs"], label="epochs")
+    lr = mo.ui.number(start=1e-5, stop=1e-1, value=d["lr"], step=1e-4, label="learning rate")
+    hidden = mo.ui.dropdown([128, 256, 512], value=d["hidden"], label="BiLSTM hidden")
+    lstm_layers = mo.ui.slider(1, 4, value=d["lstm_layers"], label="LSTM layers")
+    wlen_min = mo.ui.slider(2, 12, value=d["wlen_min"], label="train min clusters/word")
+    wlen_max = mo.ui.slider(2, 12, value=d["wlen_max"], label="train max clusters/word")
+    ood_min = mo.ui.slider(2, 12, value=d["ood_min"], label="OOD min clusters/word")
+    ood_max = mo.ui.slider(2, 12, value=d["ood_max"], label="OOD max clusters/word")
+    shaping = mo.ui.switch(value=d["shaping"], label="HarfBuzz shaping (OFF = naive renderer = G1 ablation)")
+    vocab_mode = mo.ui.dropdown(["grapheme", "codepoint"], value=d["vocab_mode"], label="CTC supervision granularity (E2)")
+    run_btn = mo.ui.run_button(label="▶ RUN PIPELINE", kind="success")
+
+    mo.hstack(
+        [mo.vstack([n_train, n_val, n_ood, batch, epochs, lr]), mo.vstack([hidden, lstm_layers, wlen_min, wlen_max, ood_min, ood_max]), mo.vstack([preset, shaping, vocab_mode, run_btn])],
+        justify="start",
+    )
+    return (
+        batch,
+        epochs,
+        hidden,
+        lr,
+        lstm_layers,
+        n_ood,
+        n_train,
+        n_val,
+        ood_max,
+        ood_min,
+        run_btn,
+        shaping,
+        vocab_mode,
+        wlen_max,
+        wlen_min,
+    )
+
+
+@app.cell
+def _(mo, run_btn, torch):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     mo.md(
         "Click the **▶ RUN PIPELINE** button above to launch the configured experiment."
@@ -352,6 +411,8 @@ def _(
     HEIGHT,
     WIDTH,
     Vocab,
+    NaiveRenderer,
+    ShapingRenderer,
     batch,
     build_cluster_pool,
     build_split,
@@ -379,8 +440,6 @@ def _(
     vocab_mode,
     wlen_max,
     wlen_min,
-    NaiveRenderer,
-    ShapingRenderer,
 ):
     output = mo.md("Idle — click **▶ RUN PIPELINE**.")
     if run_btn.value:
@@ -449,26 +508,22 @@ def _(
             "history": history,
             "wall_time_s": round(time.time() - t0, 1),
         }
-        with open("results.json", "w") as f:
-            json.dump(res, f, indent=2, ensure_ascii=False)
+        with open("results.json", "w") as _fh:
+            json.dump(res, _fh, indent=2, ensure_ascii=False)
         torch.save(model.state_dict(), "crnn_shornobharati.pt")
 
-        output = mo.vstack(
-            [
-                mo.md(
-                    f"""
-                    ## 📊 Results ({res['wall_time_s']}s total)
+        output = mo.md(
+            f"""
+            ## 📊 Results ({res['wall_time_s']}s total)
 
-                    | Eval | CER | WER | Exact | |
-                    |---|---|---|---|---|
-                    | IID val | **{iid['CER']:.4f}** | {iid['WER']:.4f} | {iid['exact_acc']:.4f} | n={n_val.value} |
-                    | OOD len-shift | **{ood['CER']:.4f}** | {ood['WER']:.4f} | {ood['exact_acc']:.4f} | n={n_ood.value} |
-                    | **ΔCER (OOD−IID)** | **{ood['CER'] - iid['CER']:+.4f}** | | | |
+            | Eval | CER | WER | Exact | |
+            |---|---|---|---|---|
+            | IID val | **{iid['CER']:.4f}** | {iid['WER']:.4f} | {iid['exact_acc']:.4f} | n={n_val.value} |
+            | OOD len-shift | **{ood['CER']:.4f}** | {ood['WER']:.4f} | {ood['exact_acc']:.4f} | n={n_ood.value} |
+            | **ΔCER (OOD−IID)** | **{ood['CER'] - iid['CER']:+.4f}** | | | |
 
-                    Emission alphabet |Π| = {vocab.size} ({vocab_mode.value}); renderer = {'HarfBuzz-shaped' if shaping.value else 'naive (C1 ablation)'}; saved to `results.json` + `crnn_shornobharati.pt`.
-                    """
-                ),
-            ]
+            Emission alphabet |Π| = {vocab.size} ({vocab_mode.value}); renderer = {'HarfBuzz-shaped' if shaping.value else 'naive (G1 ablation)'}; saved to `results.json` + `crnn_shornobharati.pt`.
+            """
         )
     output
     return (output,)
@@ -480,13 +535,16 @@ def _(mo):
         """
         ## Notes — running the full protocol (E4/E5)
 
-        **E4 (real-corpus transfer):** download [BanglaWriting](https://github.com/QuwsarOhi/bengali_word_ocr) / Ekush / BOEC, replace `build_split`'s synthetic images with a `Dataset` reading real word crops, keep the same `Vocab`/CRNN/CTC plumbing. Fine-tune from the synthetic checkpoint (load `crnn_shornobharati.pt`) vs from scratch — that comparison *is* the RQ4 result.
+        **E4 (real-corpus transfer):** download BanglaWriting (github.com/QuwsarOhi/bengali_word_ocr) / Ekush / BOEC, replace `build_split`'s synthetic images with a `Dataset` reading real word crops, keep the same `Vocab`/CRNN/CTC plumbing. Fine-tune from the synthetic checkpoint (`crnn_shornobharati.pt`) vs from scratch — that comparison *is* the RQ4 result.
 
-        **E5 (cross-script):** drop any Noto font in `fonts/` (Devanagari, Tamil, Khmer), swap the grapheme pools at the top of the renderer cell, and rerun. One-line change, as claimed in the manuscript.
+        **E5 (cross-script):** drop any Noto font into `fonts/`, point `FONT_PATH` at it, swap the grapheme pools in the renderer cell, and rerun — one-line change, as claimed in the manuscript.
 
-        **E1/E2/E3 (ablations):** use the presets — E1 sets `shaping=OFF` (naive codepoint rendering) vs ON; E2 flips `vocab_mode` grapheme↔codepoint; E3 widens train/OOD word-length ranges. Record `results.json` after each run (it overwrites — rename per experiment, e.g. `results_E1_on.json`).
+        **E1/E2/E3 (ablations):** use the presets — E1 sets the renderer toggle OFF (naive codepoint rendering) vs ON; E2 flips `vocab_mode` grapheme↔codepoint; E3 widens train/OOD word-length ranges. Record `results.json` after each run (it overwrites — rename per experiment, e.g. `results_E1_on.json`).
 
-        **Blackwell tip:** with 96GB you can raise batch to 2048–4096 and epochs ×10 for the 300k-word regime. Keep `torch.set_float32_matmul_precision("high")` if you add AMP; on CPU it is pointless so it is not included by default.
+        **molab tips:**
+        - Sessions have GPUs — check the device line above; if you started a CPU session, switch it in session settings.
+        - Persistent files live in the notebook's workspace; font + checkpoints survive between runs of the same notebook.
+        - With 96GB you can raise batch to 2048–4096 and epochs ×10 for the 300k-word regime.
         """
     )
     return

@@ -11,15 +11,21 @@ notebook/ shornobharati_train.py        ← marimo notebook for RTX Pro 6000 Bla
 papers/   10 downloaded arXiv PDFs + extracted text (txt/)
 ```
 
-## Notebook quickstart (your machine)
+## Notebook quickstart
+
+### Option A — molab (marimo's hosted GPU cloud; zero setup)
+1. Open [molab.marimo.ai](https://molab.marimo.ai) → New notebook → paste `notebook/shornobharati_train.py` (Upload → local .py also works).
+2. Start a **GPU session** (e.g. RTX Pro 6000 Blackwell 96GB).
+3. Run top-to-bottom: the first cells install missing packages and auto-download Noto Sans Bengali (OFL).
+4. Pick a preset → **▶ RUN PIPELINE**.
+
+### Option B — your machine (Blackwell GPU)
 
 ```bash
 pip install torch --index-url https://download.pytorch.org/whl/cu128   # Blackwell sm_120 needs cu128 wheel
 pip install marimo uharfbuzz freetype-py regex editdistance
 cp notebook/shornobharati_train.py .
-mkdir fonts
-# put NotoSansBengali.ttf inside fonts/ (OFL, from googlefonts/noto-fonts)
-marimo edit shornobharati_train.py
+marimo edit shornobharati_train.py   # font auto-downloads on first run
 ```
 
 Pick a preset (`quick-smoke`, `E1: shaping ablation`, `E2: supervision granularity`, `E3: length shift`) → **▶ RUN PIPELINE**. Results land in `results.json` + `crnn_shornobharati.pt`.
